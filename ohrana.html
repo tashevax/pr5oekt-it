@@ -2,22 +2,59 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Light Show – Coordinator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Light Show</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px;
+  [hidden] { display: none !important; }
+
+  /* ---- landing ---- */
+  body.landing { font-family: system-ui, sans-serif; background: #0d0b1e; color: #e6defc;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    min-height: 100vh; margin: 0; gap: 16px; text-align: center; padding: 24px; box-sizing: border-box; }
+  body.landing a { color: #fff; background: #7c3aed; padding: 14px 24px; border-radius: 10px; text-decoration: none; }
+
+  /* ---- phone ---- */
+  html.phone, body.phone { margin: 0; height: 100%; background: #000; overflow: hidden;
+    font-family: system-ui, sans-serif; color: #c9b8ff; -webkit-tap-highlight-color: transparent; }
+  #stage { position: fixed; inset: 0; background: #000; }
+  #ui { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 18px; text-align: center; padding: 24px; }
+  #go { font: inherit; font-size: 1.3rem; padding: 18px 32px; border: 0; border-radius: 14px;
+    background: #7c3aed; color: #fff; }
+  #go:disabled { opacity: .35; }
+  #status { font-size: .95rem; opacity: .8; }
+
+  /* ---- coordinator ---- */
+  body.coord { font-family: system-ui, sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px;
     background: #0d0b1e; color: #e6defc; }
-  h1 { font-weight: 600; }
-  section { margin: 22px 0; }
-  video { width: 100%; background: #000; border-radius: 8px; }
+  body.coord h1 { font-weight: 600; }
+  body.coord section { margin: 22px 0; }
+  body.coord video { width: 100%; background: #000; border-radius: 8px; }
   #qr { background: #fff; display: inline-block; padding: 10px; border-radius: 8px; }
-  a { color: #b79bff; word-break: break-all; }
-  button { font: inherit; padding: 10px 16px; border: 0; border-radius: 8px; background: #7c3aed; color: #fff; }
-  input[type=range] { width: 260px; vertical-align: middle; }
+  body.coord a { color: #b79bff; word-break: break-all; }
+  body.coord button { font: inherit; padding: 10px 16px; border: 0; border-radius: 8px; background: #7c3aed; color: #fff; }
+  body.coord input[type=range] { width: 260px; vertical-align: middle; }
   #count { font-weight: 700; font-size: 1.4rem; }
 </style>
 </head>
 <body>
+
+<div id="landing" hidden>
+  <h2>Light Show</h2>
+  <p>Phones: scan the QR code shown on the coordinator's screen.</p>
+  <a href="?host">I'm the coordinator</a>
+</div>
+
+<div id="phone" hidden>
+<div id="stage"></div>
+<div id="ui">
+  <button id="go" disabled>Go full screen</button>
+  <div id="status">Connecting…</div>
+</div>
+
+</div>
+
+<div id="coord" hidden>
 <h1>Light Show – Coordinator</h1>
 
 <section>
@@ -44,9 +81,169 @@
   <button id="test">Test flash and vibrate on all phones</button>
 </section>
 
+</div>
+
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>
+// One page, three modes:  ?room=CODE -> phone   |   ?host -> coordinator   |  neither -> landing
+const params = new URLSearchParams(location.search);
+const roomParam = params.get('room');
+const mode = roomParam ? 'phone' : params.has('host') ? 'coord' : 'landing';
+document.documentElement.classList.add(mode);
+document.body.classList.add(mode);
+document.getElementById(mode).hidden = false;
+
+function startPhone(room) {
+
+const $ = id => document.getElementById(id);
+const stage = $('stage'), ui = $('ui'), goBtn = $('go'), statusEl = $('status');
+
+let cfg = null;                       // {cues, flash, fade, delay} from coordinator
+let conn = null, lastTry = 0;
+let offset = 0;                       // coordinatorClock - localClock (ms)
+let samples = [];                     // clock-sync samples {rtt, off}
+let anchor = { playing: false, media: 0, coord: 0 };
+let started = false, fired = -1, wakeLock = null;
+
+const now = () => performance.now();
+
+// Current media time (ms) of the coordinator's player, as seen from this phone
+function mediaMs() {
+  const run = anchor.playing ? (now() + offset - anchor.coord) : 0;
+  return anchor.media * 1000 + run - (cfg ? cfg.delay : 0);
+}
+
+// ---------- Connection ----------
+const peer = new Peer();
+peer.on('disconnected', () => peer.reconnect());
+peer.on('error', () => {});
+setInterval(() => {
+  if (!room) return setStatus('Missing room code. Scan the QR code on the coordinator.');
+  if (peer.open && !(conn && conn.open) && now() - lastTry > 4000) connect();
+}, 1000);
+
+function connect() {
+  lastTry = now();
+  conn = peer.connect(room, { serialization: 'json' });
+  conn.on('open', () => { setStatus('Connected. Waiting for the show…'); goBtn.disabled = false; ping(); });
+  conn.on('close', () => { setStatus('Connection lost. Reconnecting…'); showUi(); });
+  conn.on('error', () => {});
+  conn.on('data', onData);
+}
+
+function setStatus(t) { statusEl.textContent = t; }
+function showUi() { ui.hidden = false; }
+
+// ---------- Messages ----------
+function ping() { if (conn && conn.open) conn.send({ type: 'ping', t0: now() }); }
+setInterval(ping, 2000);
+
+function onData(d) {
+  if (d.type === 'hello') { cfg = d.cfg; }
+  else if (d.type === 'cfg') { cfg = d.cfg; }
+  else if (d.type === 'pong') {
+    const t1 = now(), rtt = t1 - d.t0;
+    samples.push({ rtt, off: d.tc - (d.t0 + t1) / 2 });
+    if (samples.length > 8) samples.shift();
+    offset = samples.reduce((a, b) => (b.rtt < a.rtt ? b : a)).off;   // lowest-RTT sample wins
+  }
+  else if (d.type === 'state') {
+    const before = mediaMs(), wasPlaying = anchor.playing;
+    anchor = { playing: d.playing, media: d.media, coord: d.coord };
+    const after = mediaMs();
+    if (wasPlaying !== d.playing || Math.abs(after - before) > 250) resetFired();
+  }
+  else if (d.type === 'test') { testFlash(); }
+}
+
+// Don't vibrate for cues that are already more than 300 ms in the past (seek / late join)
+function resetFired() {
+  fired = -1;
+  if (!cfg) return;
+  const t = mediaMs();
+  cfg.cues.forEach((c, i) => { if (c[0] * 1000 <= t - 300) fired = i; });
+}
+
+// ---------- Light ----------
+// cfg.flashes = [{t: seconds, rgb: [r,g,b], fade?: ms}, ...] built by the coordinator, sorted by time
+function colorAt(e, rgb, fade = cfg.fade) {   // e = ms since the flash began
+  if (e < 0 || e >= cfg.flash + fade) return '#000';
+  const p = e < cfg.flash ? 0 : (e - cfg.flash) / fade;       // 0 = full, 1 = gone
+  const k = 1 - p;
+  return `rgb(${rgb.map(v => Math.round(v * k)).join(',')})`;
+}
+
+// Latest flash that has started wins, so a new flash cancels the previous fade.
+// Binary search: the song has hundreds of flashes and this runs every frame.
+function latestFlash(t) {
+  const f = cfg.flashes;
+  let lo = 0, hi = f.length - 1, idx = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (f[mid].t * 1000 <= t) { idx = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  return idx;
+}
+
+let testUntil = 0;
+function testFlash() {
+  testUntil = now() + cfg.flash + cfg.fade;
+  navigator.vibrate && navigator.vibrate(300);
+}
+
+function render() {
+  requestAnimationFrame(render);
+  if (!cfg) return;
+  if (now() < testUntil) {
+    stage.style.background = colorAt(now() - (testUntil - cfg.flash - cfg.fade), [255, 255, 255]);
+    return;
+  }
+  let c = '#000';
+  if (anchor.playing) {
+    const t = mediaMs(), i = latestFlash(t);
+    if (i >= 0) c = colorAt(t - cfg.flashes[i].t * 1000, cfg.flashes[i].rgb, cfg.flashes[i].fade);
+  }
+  stage.style.background = c;
+}
+requestAnimationFrame(render);
+
+// ---------- Vibration ----------
+setInterval(() => {
+  if (!cfg || !started || !anchor.playing) return;
+  const t = mediaMs();
+  for (let i = fired + 1; i < cfg.cues.length; i++) {
+    const [s, e] = cfg.cues[i].map(x => x * 1000);
+    if (t < s) break;
+    fired = i;
+    if (t - s < 300 && navigator.vibrate) navigator.vibrate(Math.max(20, e - t));
+  }
+}, 10);
+
+// ---------- Full screen + user activation ----------
+goBtn.onclick = async () => {
+  try { await document.documentElement.requestFullscreen({ navigationUI: 'hide' }); } catch (e) {}
+  navigator.vibrate && navigator.vibrate(40);       // user-initiated: unlocks vibration
+  started = true;
+  resetFired();
+  keepAwake();
+  ui.hidden = true;
+};
+document.addEventListener('fullscreenchange', () => {
+  if (started && !document.fullscreenElement) { goBtn.textContent = 'Back to full screen'; showUi(); }
+});
+
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (started && document.visibilityState === 'visible') keepAwake();
+});
+
+}
+
+function startCoordinator() {
+
 // [start, end] in seconds. Light uses only the start; vibration uses start to end.
 const CUES = [
   [10.255, 12.385], [12.980, 14.935], [15.562, 17.519],
@@ -89,7 +286,8 @@ function init(id) {
   localStorage.setItem('lsRoom', id);            // keeps the room (and QR) stable across reloads
   const peer = new Peer(id);
   peer.on('open', () => {
-    const url = new URL('index.html', location.href);
+    const url = new URL(location.href);
+    url.search = ''; url.hash = '';
     url.searchParams.set('room', id);
     $('link').href = $('link').textContent = url.href;
     $('qr').innerHTML = '';
@@ -137,6 +335,12 @@ const rebuild = () => { buildFlashes(); send({ type: 'cfg', cfg: CFG }); };
 $('first').oninput = $('last').oninput = $('fastStart').oninput = $('fastEnd').oninput = rebuild;
 buildFlashes();
 $('test').onclick = () => send({ type: 'test' });
+
+}
+
+if (mode === 'phone') startPhone(roomParam);
+else if (mode === 'coord') startCoordinator();
 </script>
 </body>
 </html>
+
