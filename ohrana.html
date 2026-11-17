@@ -32,12 +32,12 @@
 </section>
 
 <section>
-  <label>First beat (s) <input type="number" id="first" value="10.255" step="0.005" style="width:90px"></label>
-  <label style="margin-left:12px">Last beat (s) <input type="number" id="last" value="29.745" step="0.005" style="width:90px"></label>
+  <label>First beat (s) <input type="number" id="first" value="0.057" step="0.005" style="width:90px"></label>
+  <label style="margin-left:12px">Last beat (s) <input type="number" id="last" value="211" step="0.005" style="width:90px"></label>
   <p style="margin:10px 0 4px">
     <label>Fast section from (s) <input type="number" id="fastStart" value="24" step="0.5" style="width:70px"></label>
     <label style="margin-left:12px">to (s) <input type="number" id="fastEnd" value="34" step="0.5" style="width:70px"></label></p>
-  <p style="opacity:.7;margin:4px 0 14px">In the fast section the lights flash twice per beat, going white, purple, blue, purple. Before it, lights flash on every beat in this range, cycling purple, navy blue, white and blue. If they feel off the beat, nudge the first beat by a few milliseconds.</p>
+  <p style="opacity:.7;margin:4px 0 14px">Lights flash on every beat of the song (90 BPM), cycling purple, dark blue, white and dark green. In the fast section they flash twice per beat. Set both fast fields to 0 to turn it off. If the lights feel off the beat, nudge the first beat by a few milliseconds.</p>
   <label>Light delay: <b id="dv">0</b> ms
     <input type="range" id="delay" min="-300" max="500" step="5" value="0"></label>
   <p style="opacity:.7;margin:4px 0">Raise it if the lights come before the sound (speaker/Bluetooth latency).</p>
@@ -53,33 +53,32 @@ const CUES = [
   [18.145, 19.220], [19.433, 19.970], [20.715, 22.699],
   [23.304, 25.260], [25.885, 27.840], [28.466, 29.745]
 ];
-const BEAT = 0.67416;                      // seconds per beat (about 89 BPM)
-const PALETTE = [                          // cycled one color per beat
+const BEAT = 2 / 3;                        // seconds per beat: the song is a steady 90 BPM
+const PALETTE = [                          // one color per beat, then it starts again
   [168, 50, 255],   // purple
-  [20, 30, 140],    // navy blue
+  [20, 40, 160],    // dark blue
   [255, 255, 255],  // white
-  [30, 110, 255]    // blue
+  [0, 120, 50]      // dark green
 ];
 const CFG = { cues: CUES, flash: 50, fade: BEAT * 1000, delay: 0, flashes: [] };   // ms
-
-// Fast section: white, purple, blue, purple... on every half beat
-const FAST_PALETTE = [[255, 255, 255], [168, 50, 255], [30, 110, 255], [168, 50, 255]];
 
 function buildFlashes() {
   const first = parseFloat($('first').value), last = parseFloat($('last').value);
   const fs = parseFloat($('fastStart').value), fe = parseFloat($('fastEnd').value);
-  CFG.flashes = [];
-  // Normal section: one flash per beat, cycling the palette
-  for (let i = 0, t = first; t <= last && t < fs; i++, t = first + i * BEAT) {
-    CFG.flashes.push({ t: +t.toFixed(4), rgb: PALETTE[i % PALETTE.length] });
-  }
-  // Fast section: half-beat grid (stays locked to the beat), shorter fade
   const half = BEAT / 2;
-  for (let j = Math.ceil((fs - first) / half), n = 0; first + j * half <= fe; j++, n++) {
-    CFG.flashes.push({ t: +(first + j * half).toFixed(4), rgb: FAST_PALETTE[n % 4], fade: half * 1000 });
+  CFG.flashes = [];
+  // One flash per beat for the whole song, except inside the fast section
+  for (let i = 0, t = first; t <= last; i++, t = first + i * BEAT) {
+    if (t >= fs && t <= fe) continue;
+    CFG.flashes.push({ t: +t.toFixed(4), rgb: PALETTE[i % 4] });
   }
+  // Fast section: two flashes per beat, on the same beat grid, with a shorter fade
+  for (let j = Math.ceil((fs - first) / half); first + j * half <= Math.min(fe, last); j++) {
+    if (j < 0) continue;
+    CFG.flashes.push({ t: +(first + j * half).toFixed(4), rgb: PALETTE[j % 4], fade: half * 1000 });
+  }
+  CFG.flashes.sort((x, y) => x.t - y.t);
 }
-
 
 const $ = id => document.getElementById(id);
 const media = $('media');
