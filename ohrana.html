@@ -1,1 +1,108 @@
-<html>`123456</html>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Light Show – Coordinator</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px;
+    background: #0d0b1e; color: #e6defc; }
+  h1 { font-weight: 600; }
+  section { margin: 22px 0; }
+  video { width: 100%; background: #000; border-radius: 8px; }
+  #qr { background: #fff; display: inline-block; padding: 10px; border-radius: 8px; }
+  a { color: #b79bff; word-break: break-all; }
+  button { font: inherit; padding: 10px 16px; border: 0; border-radius: 8px; background: #7c3aed; color: #fff; }
+  input[type=range] { width: 260px; vertical-align: middle; }
+  #count { font-weight: 700; font-size: 1.4rem; }
+</style>
+</head>
+<body>
+<h1>Light Show – Coordinator</h1>
+
+<section>
+  <div id="qr"></div>
+  <p>Phones join here: <a id="link" target="_blank"></a></p>
+  <p>Connected phones: <span id="count">0</span></p>
+</section>
+
+<section>
+  <p><input type="file" id="file" accept="audio/*,video/*"></p>
+  <video id="media" controls playsinline></video>
+</section>
+
+<section>
+  <label>Light delay: <b id="dv">0</b> ms
+    <input type="range" id="delay" min="-300" max="500" step="5" value="0"></label>
+  <p style="opacity:.7;margin:4px 0">Raise it if the lights come before the sound (speaker/Bluetooth latency).</p>
+  <button id="test">Test flash and vibrate on all phones</button>
+</section>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+// [start, end] in seconds. Light uses only the start; vibration uses start to end.
+const CUES = [
+  [10.255, 12.385], [12.980, 14.935], [15.562, 17.519],
+  [18.145, 19.220], [19.433, 19.970], [20.715, 22.699],
+  [23.304, 25.260], [25.885, 27.840], [28.466, 29.745]
+];
+const CFG = { cues: CUES, flash: 50, fade: 674.16, delay: 0 };   // ms
+
+const $ = id => document.getElementById(id);
+const media = $('media');
+const conns = new Set();
+const newId = () => 'ls-' + Math.random().toString(36).slice(2, 8);
+
+function init(id) {
+  localStorage.setItem('lsRoom', id);            // keeps the room (and QR) stable across reloads
+  const peer = new Peer(id);
+  peer.on('open', () => {
+    const url = new URL('index.html', location.href);
+    url.searchParams.set('room', id);
+    $('link').href = $('link').textContent = url.href;
+    $('qr').innerHTML = '';
+    new QRCode($('qr'), { text: url.href, width: 180, height: 180 });
+  });
+  peer.on('error', e => { if (e.type === 'unavailable-id') init(newId()); });
+  peer.on('disconnected', () => peer.reconnect());
+  peer.on('connection', c => {
+    c.on('open', () => {
+      conns.add(c); count();
+      c.send({ type: 'hello', cfg: CFG });
+      c.send(stateMsg());
+    });
+    c.on('data', d => { if (d.type === 'ping') c.send({ type: 'pong', t0: d.t0, tc: performance.now() }); });
+    const drop = () => { conns.delete(c); count(); };
+    c.on('close', drop); c.on('error', drop);
+  });
+}
+init(localStorage.getItem('lsRoom') || newId());
+
+const count = () => $('count').textContent = conns.size;
+const send = m => conns.forEach(c => c.open && c.send(m));
+
+// coord = this computer's clock at the moment 'media' was the playhead position
+const stateMsg = () => ({
+  type: 'state',
+  playing: !media.paused && !media.ended && media.readyState >= 3,
+  media: media.currentTime,
+  coord: performance.now()
+});
+const broadcast = () => send(stateMsg());
+
+['play', 'playing', 'pause', 'waiting', 'seeked', 'ended'].forEach(ev => media.addEventListener(ev, broadcast));
+setInterval(() => { if (!media.paused) broadcast(); }, 1000);   // drift correction
+
+$('file').onchange = e => {
+  const f = e.target.files[0];
+  if (f) { media.src = URL.createObjectURL(f); }
+};
+$('delay').oninput = e => {
+  CFG.delay = +e.target.value; $('dv').textContent = CFG.delay;
+  send({ type: 'cfg', cfg: CFG });
+};
+$('test').onclick = () => send({ type: 'test' });
+</script>
+</body>
+</html>
